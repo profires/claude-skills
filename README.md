@@ -1,4 +1,4 @@
-# skill-repo
+# claude-skills
 
 Personal skill library for Claude Code.
 
@@ -12,13 +12,13 @@ Personal skill library for Claude Code.
 ## Install
 
 ```bash
-git clone https://github.com/profires/skill-repo.git ~/.claude/skills
+git clone https://github.com/profires/claude-skills.git ~/.claude/skills
 ```
 
 Or per-project:
 
 ```bash
-git clone https://github.com/profires/skill-repo.git .claude/skills
+git clone https://github.com/profires/claude-skills.git .claude/skills
 ```
 
 ## Update
