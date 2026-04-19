@@ -90,19 +90,41 @@ url = get_filing_url(cik, row["accessionNumber"], row["primaryDocument"])
 r = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json", headers=headers)
 facts = r.json()
 
-def get_fact_series(facts: dict, tag: str, form_filter: str = "10-K") -> pd.DataFrame:
-    try:
-        entries = facts["us-gaap"][tag]["units"]["USD"]
-    except KeyError:
+# ⚠️ Facts are nested under facts["facts"], not facts directly
+gaap = facts["facts"].get("us-gaap", {})
+
+def get_fact_series(gaap: dict, tag: str, form_filter: str = "10-K",
+                    annual_only: bool = True) -> pd.DataFrame:
+    """
+    annual_only: filter to ~365-day periods (income/CF items only).
+                 Set False for balance sheet items (no 'start' field).
+    """
+    if tag not in gaap:
+        return pd.DataFrame()
+    units = gaap[tag].get("units", {})
+    entries = units.get("USD", units.get("CAD", []))  # fallback for Canadian filers
+    if not entries:
         return pd.DataFrame()
     df = pd.DataFrame(entries)
-    df = df[df["form"] == form_filter].copy()
+    if form_filter:
+        df = df[df["form"] == form_filter].copy()
+    if df.empty:
+        return pd.DataFrame()
     df["end"] = pd.to_datetime(df["end"])
     df = df.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
-    return df[["end", "val", "filed", "accn"]].sort_values("end")
+    if annual_only and "start" in df.columns and df["start"].notna().any():
+        df["start"] = pd.to_datetime(df["start"])
+        df["days"] = (df["end"] - df["start"]).dt.days
+        df = df[df["days"].between(340, 380)]
+    return df[["end", "val", "filed"]].sort_values("end").reset_index(drop=True)
 
-revenue = get_fact_series(facts, "Revenues")
-# If empty, try: get_fact_series(facts, "RevenueFromContractWithCustomerExcludingAssessedTax")
+# Revenue: try post-ASC 606 tag first, then legacy fallback
+revenue = get_fact_series(gaap, "RevenueFromContractWithCustomerExcludingAssessedTax")
+if revenue.empty:
+    revenue = get_fact_series(gaap, "Revenues")
+
+# Balance sheet (no start field — set annual_only=False)
+cash = get_fact_series(gaap, "CashAndCashEquivalentsAtCarryingValue", annual_only=False)
 ```
 
 ### 5. Single Concept (Faster)
@@ -112,6 +134,7 @@ r = requests.get(
     f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/NetIncomeLoss.json",
     headers=headers,
 )
+# companyconcept endpoint returns units directly (no "facts" wrapper)
 entries = r.json()["units"]["USD"]
 ```
 
@@ -126,21 +149,49 @@ def edgar_search(query: str, form: str = "10-K", start: str = None, end: str = N
     return r.json().get("hits", {}).get("hits", [])
 ```
 
+### 7. CSV Export (Batch Financials)
+
+```python
+client = EdgarClient("ResearchBot research@example.com")
+
+# Wide format: one row per ticker with latest-year financials ($M)
+df = client.export_snapshot_csv(
+    ["AAPL", "MSFT", "GOOGL"],
+    output_path="snapshot.csv",  # optional — also returns DataFrame
+)
+# Columns: ticker, latest_year, revenue_m, net_income_m, ebit_m,
+#   ebit_margin, operating_cf_m, cash_m, long_term_debt_m, net_debt_m, rev_growth_yoy
+
+# Long format: multi-year time series for trend analysis
+ts = client.export_timeseries_csv(
+    ["AAPL", "MSFT", "GOOGL"],
+    output_path="timeseries.csv",
+)
+# Columns: ticker, year, metric, value_m
+# Metrics: revenue, net_income, ebit, operating_cf, cash, long_term_debt
+```
+
 ## Common XBRL Tags
 
 See `references/xbrl-tags.md` for the full list with aliases.
 
-**Income:** Revenues, NetIncomeLoss, OperatingIncomeLoss, GrossProfit, EarningsPerShareDiluted
+**Income:** NetIncomeLoss (fallback: ProfitLoss), Revenues, OperatingIncomeLoss, GrossProfit, EarningsPerShareDiluted
 **Balance sheet:** Assets, Liabilities, StockholdersEquity, CashAndCashEquivalentsAtCarryingValue, LongTermDebt
 **Cash flow:** NetCashProvidedByUsedInOperatingActivities, PaymentsToAcquirePropertyPlantAndEquipment
 
 ## Gotchas
 
+- **Facts are nested** — response is `facts["facts"]["us-gaap"]`, NOT `facts["us-gaap"]`
 - **CIK must be 10 digits** — always `str(cik).zfill(10)`
 - **Accession number in URLs** — strip hyphens: `0001234567-24-000001` → `000123456724000001`
 - **Duplicate XBRL values** — deduplicate by keeping latest filed per period end
-- **Tag aliases** — PLTR uses `RevenueFromContractWithCustomerExcludingAssessedTax`, not `Revenues`
-- **Non-US filers** — use `ifrs-full` taxonomy instead of `us-gaap` for 20-F filers
+- **Revenue tag priority** — try `RevenueFromContractWithCustomerExcludingAssessedTax` FIRST (post-ASC 606, 2018+); `Revenues` often only has pre-2018 data and will return stale decade-old figures
+- **Annual period filtering** — income/CF entries include quarterly cumulative values also tagged `10-K`; filter to `days between 340–380` to get true annual figures
+- **Balance sheet items have no `start` field** — `Assets`, `CashAndCashEquivalentsAtCarryingValue`, `LongTermDebt` etc. are point-in-time; don't apply period-length filter or they'll all drop
+- **20-F filers** — foreign private issuers (non-Canadian) use `ifrs-full` taxonomy instead of `us-gaap`
+- **40-F filers** — Canadian companies (e.g. Cameco/CCJ, Shopify/SHOP) file 40-F under Canadian GAAP; `us-gaap` will be empty. Use manual data or check `ifrs-full`
+- **Net income tag varies** — some companies (e.g. Bloom Energy/BE) use `ProfitLoss` instead of `NetIncomeLoss` for recent filings; always try both with fallback
+- **companyconcept endpoint** — returns `r.json()["units"]["USD"]` directly, no `"facts"` wrapper
 - **SET/Thai stocks** — EDGAR doesn't cover them; see `references/set-api.md`
 
 ## Reference Files
