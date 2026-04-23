@@ -97,12 +97,18 @@ class EdgarClient:
         if df.empty:
             return pd.DataFrame(columns=["end", "val", "filed"])
         df["end"] = pd.to_datetime(df["end"])
-        df = df.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
-        if annual_only and "start" in df.columns and df["start"].notna().any():
+        if "start" in df.columns:
             df["start"] = pd.to_datetime(df["start"])
+            # Dedup on (end, start) so a stand-alone quarter and a YTD cumulative
+            # sharing the same end date both survive for the period-length filter.
+            dedup_keys = ["end", "start"]
+        else:
+            dedup_keys = ["end"]
+        df = df.sort_values("filed").drop_duplicates(subset=dedup_keys, keep="last")
+        if annual_only and "start" in df.columns and df["start"].notna().any():
             df["days"] = (df["end"] - df["start"]).dt.days
             df = df[df["days"].between(340, 380)]
-        cols = [c for c in ["end", "val", "filed", "accn"] if c in df.columns]
+        cols = [c for c in ["end", "val", "filed", "accn", "start"] if c in df.columns]
         return df[cols].sort_values("end").reset_index(drop=True)
 
     def search(self, query: str, form: str = "10-K",

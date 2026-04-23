@@ -111,12 +111,19 @@ def get_fact_series(gaap: dict, tag: str, form_filter: str = "10-K",
     if df.empty:
         return pd.DataFrame()
     df["end"] = pd.to_datetime(df["end"])
-    df = df.sort_values("filed").drop_duplicates(subset=["end"], keep="last")
-    if annual_only and "start" in df.columns and df["start"].notna().any():
+    if "start" in df.columns:
         df["start"] = pd.to_datetime(df["start"])
+        # Dedup on (end, start) so a stand-alone quarter and a YTD cumulative
+        # sharing the same end date both survive for the period-length filter.
+        dedup_keys = ["end", "start"]
+    else:
+        dedup_keys = ["end"]
+    df = df.sort_values("filed").drop_duplicates(subset=dedup_keys, keep="last")
+    if annual_only and "start" in df.columns and df["start"].notna().any():
         df["days"] = (df["end"] - df["start"]).dt.days
         df = df[df["days"].between(340, 380)]
-    return df[["end", "val", "filed"]].sort_values("end").reset_index(drop=True)
+    cols = [c for c in ["end", "val", "filed", "start"] if c in df.columns]
+    return df[cols].sort_values("end").reset_index(drop=True)
 
 # Revenue: try post-ASC 606 tag first, then legacy fallback
 revenue = get_fact_series(gaap, "RevenueFromContractWithCustomerExcludingAssessedTax")
